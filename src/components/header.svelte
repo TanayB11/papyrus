@@ -1,13 +1,14 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
+    import { firstPage } from '$lib/index';
 
     onMount(darkMode.init);
 </script>
 
 
 <header>
-    <a href="/" class="title">
+    <a href="/" class="title" onclick={firstPage}>
         <h1 id="header-name">papyrus</h1>
     </a>
     <div class="header-links">

@@ -1,7 +1,7 @@
 # app.py
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from dateutil.parser import parse
-from urllib.parse import quote
 import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, HTTPException
@@ -11,10 +11,10 @@ import requests
 import uvicorn
 
 import duckdb
-from cachetools import cached, TTLCache
+import asyncio
+import httpx
 
 app = FastAPI()
-cache = TTLCache(maxsize=250, ttl=60*5) # 5 minutes
 
 # Enable CORS
 app.add_middleware(
@@ -25,14 +25,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+cache = {} # key: feed_url, value: parsed_articles
+CACHE_TTL = timedelta(minutes=2)
+
+# ================================================
+# DATABASE SETUP
+# ================================================
+
 db = duckdb.connect('./data/papyrus.db')
 
-# Create sequence if it doesn't exist
 db.execute("""
     CREATE SEQUENCE IF NOT EXISTS feed_id_seq;
 """)
 
-# Create feeds table if it doesn't exist
 db.execute("""
     CREATE TABLE IF NOT EXISTS feeds (
         id INTEGER PRIMARY KEY DEFAULT nextval('feed_id_seq'),
@@ -41,101 +46,140 @@ db.execute("""
     )
 """)
 
-@app.get('/proxy')
-async def proxy(url: str):
-    try:
-        response = requests.get(url)
-        return Response(content=response.text, media_type="application/xml")
-    except:
-        raise HTTPException(status_code=500, detail="Error fetching RSS feed")
+# ================================================
+# ROUTES
+# ================================================
 
 @app.get('/get_feeds')
 async def get_feeds():
+    """
+    Get all feeds.
+
+    Returns:
+        list[(id, url, name)]: The list of RSS feeds
+    """
     try:
         return db.sql('SELECT * FROM feeds').fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@cached(cache=cache)
-def get_all_feed_items():
-    # Get all feeds
-    lookup = db.sql('SELECT * FROM feeds').fetchall()
-    feeds = [{'id': feed[0], 'url': feed[1], 'name': feed[2]} for feed in lookup]
+# @cached(cache=cache)
+async def parse_feed(feed_url: str, feed_name: str):
+    """
+    Get articles from a feed.
 
-    all_items = []
-    for feed in feeds:
-        feed_id, url, feed_name = feed['id'], feed['url'], feed['name']
-        
-        response = requests.get(url) # get XML
+    Args:
+        feed_url (str): The URL of the feed
+        feed_name (str): The nickname of the feed
+
+    Returns:
+        list[{ feed_name, title, link, description, summary, date }]: The list of parsed articles
+    """
+    parsed_articles = []
+
+    # TODO: utilize cache
+
+    try: # get and parse xml
+        async with httpx.AsyncClient() as client:
+            current_time = datetime.now()
+            response = None
+
+            if feed_url in cache:
+                timestamp, response = cache[feed_url]
+                if current_time - timestamp >= CACHE_TTL:
+                    cache.pop(feed_url)
+                    response = None
+            if response is None:
+                response = await client.get(feed_url)
+                cache[feed_url] = (current_time, response)
+            
         xml_content = response.text
+        root = ET.fromstring(xml_content)
+        raw_articles = root.findall('.//item') or root.findall('.//entry')
+    except:
+        raise HTTPException(status_code=500, detail="Error parsing XML")
+
+    # searches XML for tags
+    def get_text(elem, tags):
+        for tag in tags:
+            el = item.find(tag)
+            if el is not None:
+                return el.text
+        return None
+
+    for item in raw_articles:
+        title = get_text(item, ['title'])
+        link = get_text(item, ['link'])
+        description = get_text(item, ['description', 'content'])
+        summary = get_text(item, ['summary'])
+        date_str = get_text(item, ['pubDate', 'published', 'updated'])
+
         try:
-            root = ET.fromstring(xml_content) # parsed XML
+            date = parse(date_str) if date_str else None
         except:
-            raise HTTPException(status_code=500, detail="Error parsing XML")
-        
-        items = root.findall('.//item') or root.findall('.//entry')
+            date = None
 
-        for item in items:
-            # Extract data with namespace handling
-            def get_text(elem, tags):
-                for tag in tags:
-                    # Try without namespace
-                    el = item.find(tag)
-                    if el is not None:
-                        return el.text
-                return None
+        if title and link:
+            parsed_articles.append({
+                'feed_name': feed_name,
+                'title': title,
+                'link': link, 
+                'description': description,
+                'summary': summary,
+                'date': date.strftime('%Y-%m-%d') if date else None
+            })
 
-            # Get title and link
-            title = get_text(item, ['title'])
-            link = get_text(item, ['link'])
-            
-            # Get content/description
-            description = get_text(item, ['description', 'content'])
-            summary = get_text(item, ['summary'])
-            
-            # Get and parse date
-            date_str = get_text(item, ['pubDate', 'published', 'updated'])
-            try:
-                date = parse(date_str) if date_str else None
-            except:
-                date = None
-            
-            if title and link:  # Only add if we have at least title and link
-                all_items.append({
-                    'feed_name': feed_name,
-                    'title': title,
-                    'link': link, 
-                    'description': description,
-                    'summary': summary,
-                    'date': date.strftime('%Y-%m-%d') if date else None
-                })
-    
-    all_items.sort(key=lambda x: x['date'] if x['date'] else datetime.min, reverse=True)
-    return all_items
+    return parsed_articles
 
 
-@app.get('/get_feed_items')
-async def get_feed_items(page_num: int, items_per_page: int):
-    # page_num is 0-indexed
+@app.get('/all_articles')
+async def get_all_articles(page_num: int, items_per_page: int):
+    """
+    Get items from all feeds, paginated.
+
+    Args:
+        page_num (int): The current page number (zero-indexed)
+        items_per_page (int): The number of items per page
+
+    Returns:
+        dict{items, total_pages}: The items and total number of pages
+    """
     try:
-        all_items = get_all_feed_items()
+        lookup = db.sql('SELECT * FROM feeds').fetchall()
+        feeds = [{'id': feed[0], 'url': feed[1], 'name': feed[2]} for feed in lookup]
+
+        results = await asyncio.gather(*(
+            parse_feed(feed['url'], feed['name']) for feed in feeds
+        ))
+
+        all_articles = []
+        for items in results:
+            all_articles.extend(items)
+        all_articles.sort(key=lambda x: x['date'] if x['date'] else datetime.min, reverse=True)
         
-        # Calculate pagination
+        # calculate pagination
         start_idx = page_num * items_per_page
         end_idx = start_idx + items_per_page
 
         return {
-            'items': all_items[start_idx:end_idx],
-            'total_pages': len(all_items) // items_per_page
+            'items': all_articles[start_idx:end_idx],
+            'total_pages': len(all_articles) // items_per_page
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post('/create_feed')
 async def create_feed(feed_url: str, feed_name: str):
+    """
+    Create a new feed.
+
+    Args:
+        feed_url (str): The URL of the feed
+        feed_name (str): The nickname of the feed
+    """
     try:
-        print(feed_url, feed_name)
         db.execute("""
             INSERT INTO feeds (id, url, name) 
             VALUES (nextval('feed_id_seq'), ?, ?)
@@ -144,13 +188,22 @@ async def create_feed(feed_url: str, feed_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.delete('/delete_feed/{feed_id}')
 async def delete_feed(feed_id: int):
+    """
+    Delete a feed.
+
+    Args:
+        feed_id (int): The ID of the feed
+    """
     try:
         db.execute("DELETE FROM feeds WHERE id = ?", [feed_id])
         return {"message": "Feed deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 if __name__ == '__main__':
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    port = os.getenv('PORT', 2430)
+    uvicorn.run(app, host="0.0.0.0", port=port)

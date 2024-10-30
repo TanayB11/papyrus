@@ -1,46 +1,13 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
-    import { server_url } from '$lib/index';
+    import { get_feed_page, current_page, nextPage, prevPage, firstPage, feed_items } from '$lib/index';
     import Header from '../components/header.svelte';
 
-    let ITEMS_PER_PAGE = 50;
-    let currentPage = 0;
-    let totalPages = 0;
-
-    let feed_items = [];
-
-    let get_feed_page = async () => {
-        const response = await fetch(`${server_url}/get_feed_items?page_num=${currentPage}&items_per_page=${ITEMS_PER_PAGE}`);
-        if (response.ok) {
-            const data = await response.json();
-            feed_items = data.items;
-            totalPages = data.total_pages;
-        }
-    }
 
     onMount(async () => {
         await get_feed_page();
     });
-
-    async function nextPage() {
-        if (currentPage < totalPages - 1) {
-            currentPage++;
-            await get_feed_page();
-        }
-    }
-
-    async function prevPage() {
-        if (currentPage > 0) {
-            currentPage--;
-            await get_feed_page();
-        }
-    }
-
-    async function firstPage() {
-        currentPage = 0;
-        await get_feed_page();
-    }
 
     onMount(darkMode.init);
 </script>
@@ -50,7 +17,7 @@
     <Header />
 
     <div class="feed-list">
-        {#each feed_items as feed}
+        {#each $feed_items as feed}
             <p>
                 <strong>
                     <a href={feed.link} target="_blank" rel="noopener noreferrer">{feed.title}</a>
@@ -67,12 +34,12 @@
 
     <footer>
         <div>
-            <button on:click={prevPage}>&larr;</button>
-            <small>page {currentPage + 1}</small>
-            <button on:click={nextPage}>&rarr;</button>
+            <button onclick={prevPage}>&larr;</button>
+            <small>page {$current_page + 1}</small>
+            <button onclick={nextPage}>&rarr;</button>
         </div>
         <div>
-            <button on:click={firstPage}>view latest</button>
+            <button onclick={firstPage}>view latest</button>
         </div>
     </footer>
 </div>
