@@ -13,11 +13,11 @@
     let newFeedUrl = '';
     let newFeedName = '';
 
-    function deleteFeed(id) {
-        fetch(`${server_url}/delete_feed/${id}`, {
+    function deleteFeed(url) {
+        fetch(`${server_url}/delete_feed/${encodeURIComponent(url)}`, {
             method: 'DELETE'
         }).then(() => {
-            feeds.set(feeds.filter(feed => feed[0] !== id));
+            feeds.set(feeds.filter(feed => feed[1] !== url));
         });
     }
 
@@ -73,7 +73,7 @@
                     <a href={feed[1]} target="_blank" rel="noopener noreferrer">{feed[2]}</a>
                 </strong>
 
-                <button on:click={() => deleteFeed(feed[0])} aria-label="Delete Feed">
+                <button on:click={() => deleteFeed(feed[1])} aria-label="Delete Feed">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                 </button>
             </p>
