@@ -15,9 +15,7 @@ import httpx
 import json
 
 import numpy as np
-from sklearn.svm import SVC
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import PCA
+from svm import SVMModel, gen_embeddings_data, gen_svm_data
 
 # ================================================
 # FASTAPI SETUP
@@ -32,10 +30,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-feed_cache = {} # key: feed_url, value: (timestamp, XML data)
-CACHE_TTL = timedelta(minutes=1)
-
 
 # ================================================
 # DATABASE SETUP
@@ -67,49 +61,36 @@ db.execute("""
 """)
 
 # ================================================
-# TODO: NLP MODELING SETUP
+# MODELING SETUP
 # ================================================
-tfidf = TfidfVectorizer()
 
-MIN_DATASET_SIZE = 10
+model = SVMModel()
+VISUALIZE_PCA = True
 
-# get liked articles and equal number of random unliked articles for training
-liked_articles = db.sql('SELECT title, description FROM articles WHERE is_liked = true').fetchall()
-unliked_articles = db.sql(f'SELECT title, description FROM articles WHERE is_liked = false ORDER BY RANDOM() LIMIT {len(liked_articles)}').fetchall()
-dataset = liked_articles + unliked_articles
+def fit_svm(model: SVMModel, all_articles: list[dict]):
+    """
+    Fits the SVM model on the given articles
 
-# TODO: make code neater
-print(len(dataset))
-if len(dataset) >= MIN_DATASET_SIZE:
-    # extract features from article descriptions
-    # shape: (n_samples, n_features)
-    X = tfidf.fit_transform([article[1] for article in dataset])
+    Args:
+        model (SVMModel): The SVM model to fit
+        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
+    
+    Returns:
+        bool: Whether the SVM model was successfully fitted
+    """
+    if model.train_embeddings(gen_embeddings_data(db)):
+        X, y = gen_svm_data(db)
+        model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
+        return True
 
-    # n_features is high; reduce dimensionality for SVM
-    n_components = min(X.shape[0]-1, X.shape[1]-1, 100)
-    pca = PCA(n_components=n_components)
-    X_pca = pca.fit_transform(X)
+    return False
 
-    # create labels array (1 for liked, 0 for unliked)
-    y = np.array([1] * len(liked_articles) + [0] * len(unliked_articles))
+# ================================================
+# CACHING
+# ================================================
 
-    # fit SVM classifier
-    svm = SVC(kernel='rbf', probability=True)
-    svm.fit(X_pca, y)
-
-
-# EDA
-# plot first 2 principal components
-from matplotlib import pyplot as plt
-plt.figure(figsize=(10, 6))
-plt.scatter(X_pca[len(liked_articles):, 0], X_pca[len(liked_articles):, 1], label='Unliked', alpha=0.5)
-plt.scatter(X_pca[:len(liked_articles), 0], X_pca[:len(liked_articles), 1], label='Liked', alpha=0.5)
-plt.xlabel('First Principal Component')
-plt.ylabel('Second Principal Component')
-plt.title('PCA of Article Features')
-plt.legend()
-plt.savefig('pca_plot.png')
-plt.close()
+feed_cache = {} # key: feed_url, value: (timestamp, XML data)
+CACHE_TTL = timedelta(minutes=1)
 
 
 # ================================================
@@ -136,21 +117,21 @@ async def parse_feed(feed_url: str, feed_name: str):
     parsed_articles = []
 
     try: # get and parse xml
-        async with httpx.AsyncClient() as client:
-            current_time = datetime.now()
+        current_time = datetime.now()
+        xml_content = None
+
+        if feed_url in feed_cache:
+            timestamp, xml_content = feed_cache[feed_url]
+            if current_time - timestamp < CACHE_TTL:
+                return # no need to repopulate the tables
+            feed_cache.pop(feed_url)
             xml_content = None
 
-            if feed_url in feed_cache:
-                timestamp, xml_content = feed_cache[feed_url]
-                if current_time - timestamp < CACHE_TTL:
-                    return # no need to repopulate the tables
-                feed_cache.pop(feed_url)
-                xml_content = None
-
-            if xml_content is None:
+        if xml_content is None:
+            async with httpx.AsyncClient() as client:
                 response = await client.get(feed_url)
-                xml_content = response.text
-                feed_cache[feed_url] = (current_time, xml_content)
+            xml_content = response.text
+            feed_cache[feed_url] = (current_time, xml_content)
 
         root = ET.fromstring(xml_content)
         raw_articles = root.findall('.//item') or root.findall('.//entry')
@@ -199,6 +180,8 @@ async def get_all_articles(page_num: int, items_per_page: int):
     Returns:
         dict{items, total_pages}: The items and total number of pages
     """
+    global embeddings_trained
+
     try:
         lookup = db.sql('SELECT * FROM feeds').fetchall()
         feeds = [{'id': feed[0], 'url': feed[1], 'name': feed[2]} for feed in lookup]
@@ -220,20 +203,22 @@ async def get_all_articles(page_num: int, items_per_page: int):
             ORDER BY COALESCE(date, '1900-01-01') DESC
         """).fetchall()
 
+        # duckdb gives list(tuple(json string)); parse it
+        all_articles = [json.loads(article[0]) for article in all_articles]
         parsed_articles = []
-        for article in all_articles:
-            loaded_article = json.loads(article[0])
 
-            if len(dataset) >= MIN_DATASET_SIZE:
-                description = loaded_article['description']
-                description_vector = tfidf.transform([description])
-                description_pca = pca.transform(description_vector)
-                svm_prob = svm.predict_proba(description_pca)[0][1]
+        trained_svm = fit_svm(model, all_articles)
+
+        for article in all_articles:
+            if trained_svm:
+                embeddings = model.embed([article['description']])
+                embeddings = np.array(embeddings)
+                svm_prob = model.predict(embeddings)
             else:
-                svm_prob = 0.5
+                svm_prob = 0.5 # ambivalent
 
             parsed_articles.append({
-                **loaded_article,
+                **article,
                 'svm_prob': svm_prob
             })
 
