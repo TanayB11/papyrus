@@ -9,8 +9,26 @@ const ITEMS_PER_PAGE = 20;
 export const current_page = writable(0);
 export const total_pages = writable(0);
 
-export const get_feed_page = async () => {
-    const response = await fetch(`${server_url}/all_articles?page_num=${get(current_page)}&items_per_page=${ITEMS_PER_PAGE}`);
+export const get_feed_page = async (use_cache=true) => {
+    const fetchPage = (page_num) => fetch(
+        `${server_url}/all_articles?page_num=${page_num}&items_per_page=${ITEMS_PER_PAGE}`,
+        {
+            headers: { 'Cache-Control': use_cache ? 'max-age=60' : 'no-cache' }
+        }
+    );
+
+    const current = get(current_page);
+    const requests = [fetchPage(current)];
+    
+    // prefetching
+    if (current > 0) {
+        requests.push(fetchPage(current - 1));
+    }
+    if (current < get(total_pages) - 1) {
+        requests.push(fetchPage(current + 1));
+    }
+
+    const [response] = await Promise.all(requests);
     if (response.ok) {
         const data = await response.json();
         feed_items.set(data.items);

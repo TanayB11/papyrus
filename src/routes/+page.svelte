@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
-    import { get_feed_page, current_page, nextPage, prevPage, firstPage, feed_items, server_url } from '$lib/index';
+    import { get_feed_page, current_page, total_pages, nextPage, prevPage, firstPage, feed_items, server_url } from '$lib/index';
     import Header from '../components/header.svelte';
 
 
@@ -11,7 +11,7 @@
 
     async function toggle_like_article(url) {
         await fetch(`${server_url}/toggle_like_article?url=${encodeURIComponent(url)}`, { method: 'POST' });
-        await get_feed_page();
+        await get_feed_page(false);
     }
 
     onMount(darkMode.init);
@@ -23,7 +23,7 @@
 
     <div class="feed-list">
         {#if $feed_items.length === 0}
-            <p style="text-align: center;">loading...</p>
+            <p style="text-align: center;">no articles found</p>
         {/if}
         {#each $feed_items as feed}
             <p>
@@ -41,7 +41,7 @@
     <footer>
         <div>
             <button onclick={prevPage}>&larr;</button>
-            <small>page {$current_page + 1}</small>
+            <small>page {$current_page + 1}/{$total_pages}</small>
             <button onclick={nextPage}>&rarr;</button>
         </div>
         <div>

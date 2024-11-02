@@ -117,15 +117,30 @@ def gen_svm_data(conn: duckdb.DuckDBPyConnection):
     """
     Generates a dataset of articles for training the SVM
     (equal number of liked and unliked articles)
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: embeddings and labels
+        (None, None) if there are no articles in the database
     """
-    liked_articles = conn.sql('SELECT description, is_liked FROM articles WHERE is_liked = true').fetchall()
-    unliked_articles = conn.sql(f'SELECT description, is_liked FROM articles WHERE is_liked = false ORDER BY RANDOM() LIMIT {len(liked_articles)}').fetchall()
-    
-    X, y = zip(*[(article[0], article[1]) for article in liked_articles + unliked_articles])
-    return X, y
+    liked_articles = conn.sql('SELECT description, title, is_liked FROM articles WHERE is_liked = true').fetchall()
+
+    if len(liked_articles) == 0:
+        return None, None
+
+    unliked_articles = conn.sql(f'SELECT description, title, is_liked FROM articles WHERE is_liked = false ORDER BY RANDOM() LIMIT {len(liked_articles)}').fetchall()
+    X, y = zip(*[
+        (article[0] + ' ' + article[1], article[2])
+        for article in liked_articles + unliked_articles
+        if article[0] and article[1]
+    ])
+    return X, np.array(y)
 
 def gen_embeddings_data(conn: duckdb.DuckDBPyConnection):
     """
     Generates a dataset of articles for training the embeddings
     """
-    return [article[0] for article in conn.sql('SELECT description FROM articles').fetchall()]
+    return [
+        article[0] + ' ' + article[1]
+        for article in conn.sql('SELECT description, title FROM articles').fetchall()
+        if article[0] and article[1]
+    ]

@@ -13,6 +13,7 @@ import duckdb
 import asyncio
 import httpx
 import json
+import feedparser
 
 import numpy as np
 from svm import SVMModel, gen_embeddings_data, gen_svm_data
@@ -34,7 +35,7 @@ app.add_middleware(
 # ================================================
 # DATABASE SETUP
 # ================================================
-db = duckdb.connect('./data/papyrus.db')
+db = duckdb.connect('./data/papyrus.db') # optimistic concurrency control by default
 
 db.execute("CREATE SEQUENCE IF NOT EXISTS feed_id_seq;")
 db.execute("CREATE SEQUENCE IF NOT EXISTS article_id_seq;")
@@ -43,7 +44,8 @@ db.execute("""
     CREATE TABLE IF NOT EXISTS feeds (
         id INTEGER PRIMARY KEY DEFAULT nextval('feed_id_seq'),
         url VARCHAR,
-        name VARCHAR
+        name VARCHAR,
+        timestamp TIMESTAMP
     )
 """)
 
@@ -56,9 +58,11 @@ db.execute("""
         url VARCHAR UNIQUE,
         date DATE,
         description VARCHAR,
-        is_liked BOOLEAN
+        is_liked BOOLEAN,
     )
 """)
+
+MAX_ARTICLES = 500
 
 # ================================================
 # MODELING SETUP
@@ -67,7 +71,7 @@ db.execute("""
 model = SVMModel()
 VISUALIZE_PCA = True
 
-def fit_svm(model: SVMModel, all_articles: list[dict]):
+def fit_svm(model: SVMModel):
     """
     Fits the SVM model on the given articles
 
@@ -80,8 +84,9 @@ def fit_svm(model: SVMModel, all_articles: list[dict]):
     """
     if model.train_embeddings(gen_embeddings_data(db)):
         X, y = gen_svm_data(db)
-        model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
-        return True
+        if X is not None and y is not None:
+            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
+            return True
 
     return False
 
@@ -89,9 +94,7 @@ def fit_svm(model: SVMModel, all_articles: list[dict]):
 # CACHING
 # ================================================
 
-feed_cache = {} # key: feed_url, value: (timestamp, XML data)
-CACHE_TTL = timedelta(minutes=1)
-
+CACHE_TTL = timedelta(minutes=5)
 
 # ================================================
 # ROUTES
@@ -115,42 +118,41 @@ async def parse_feed(feed_url: str, feed_name: str):
     Updates the articles table with new articles from a feed
     """
     parsed_articles = []
+    current_time = datetime.now()
 
-    try: # get and parse xml
-        current_time = datetime.now()
-        xml_content = None
-
-        if feed_url in feed_cache:
-            timestamp, xml_content = feed_cache[feed_url]
-            if current_time - timestamp < CACHE_TTL:
-                return # no need to repopulate the tables
-            feed_cache.pop(feed_url)
-            xml_content = None
-
-        if xml_content is None:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(feed_url)
-            xml_content = response.text
-            feed_cache[feed_url] = (current_time, xml_content)
-
-        root = ET.fromstring(xml_content)
-        raw_articles = root.findall('.//item') or root.findall('.//entry')
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(feed_url)
+        parsed_feed = feedparser.parse(response.text)
     except:
-        raise HTTPException(status_code=500, detail="Error parsing XML")
+        raise HTTPException(status_code=500, detail=f'Error parsing feed {feed_url}')
 
-    # searches XML for tags
-    def get_text(elem, tags):
-        for tag in tags:
-            el = item.find(tag)
-            if el is not None:
-                return el.text
-        return None
+    
+    num_parsed_articles = 0
 
-    for item in raw_articles:
-        title = get_text(item, ['title'])
-        url = get_text(item, ['link'])
-        description = get_text(item, ['description', 'content'])
-        date_str = get_text(item, ['pubDate', 'published', 'updated'])
+    # lots of jank parsing stuff here
+    for item in parsed_feed.entries:
+        title = item.title if 'title' in item else None
+        url = item.link if 'link' in item else None
+
+        description = None
+        if 'content' in item:
+            description = item.content[0].value
+        elif 'description' in item:
+            description = item.description
+            if type(description) == tuple:
+                description = description[0]
+            else:
+                description = None
+
+        date_str = None
+        if 'published' in item:
+            date_str = item.published
+        elif 'updated' in item:
+            date_str = item.updated
+        elif 'pubDate' in item:
+            date_str = item.pubDate
+
         try:
             date = parse(date_str).strftime('%Y-%m-%d') if date_str else None
         except:
@@ -167,6 +169,12 @@ async def parse_feed(feed_url: str, feed_name: str):
                 date = EXCLUDED.date
         """, [feed_name, feed_url, title, url, description, date])
 
+        num_parsed_articles += 1
+        if num_parsed_articles >= MAX_ARTICLES:
+            break
+
+    db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
+
 
 @app.get('/all_articles')
 async def get_all_articles(page_num: int, items_per_page: int):
@@ -180,17 +188,27 @@ async def get_all_articles(page_num: int, items_per_page: int):
     Returns:
         dict{items, total_pages}: The items and total number of pages
     """
-    global embeddings_trained
-
     try:
-        lookup = db.sql('SELECT * FROM feeds').fetchall()
-        feeds = [{'id': feed[0], 'url': feed[1], 'name': feed[2]} for feed in lookup]
+        all_feeds = db.sql("""
+            SELECT json_object(
+                'id', id,
+                'url', url,
+                'name', name,
+                'timestamp', timestamp
+            ) as feed 
+            FROM feeds
+        """).fetchall()
+        feeds = [json.loads(feed[0]) for feed in all_feeds]
 
-        await asyncio.gather(*(
+        # populate articles table
+        tasks = [
             parse_feed(feed['url'], feed['name']) for feed in feeds
-        ))
+            if datetime.now() - datetime.fromisoformat(feed['timestamp']) > CACHE_TTL
+        ]
 
-        all_articles = db.sql("""
+        await asyncio.gather(*tasks)
+
+        all_articles = db.execute("""
             SELECT json_object(
                 'name', feed_name,
                 'title', title,
@@ -201,17 +219,19 @@ async def get_all_articles(page_num: int, items_per_page: int):
             ) as article
             FROM articles 
             ORDER BY COALESCE(date, '1900-01-01') DESC
-        """).fetchall()
-
-        # duckdb gives list(tuple(json string)); parse it
+            LIMIT ?
+        """, [MAX_ARTICLES]).fetchall()
         all_articles = [json.loads(article[0]) for article in all_articles]
+
+        trained_svm = fit_svm(model)
+
         parsed_articles = []
-
-        trained_svm = fit_svm(model, all_articles)
-
         for article in all_articles:
-            if trained_svm:
-                embeddings = model.embed([article['description']])
+            # we need something to embed
+            if trained_svm and (article['description'] or article['title']):
+                embeddings = model.embed([
+                    (article['description'] or '') + ' ' + (article['title'] or '')
+                ])
                 embeddings = np.array(embeddings)
                 svm_prob = model.predict(embeddings)
             else:
@@ -226,9 +246,13 @@ async def get_all_articles(page_num: int, items_per_page: int):
         start_idx = page_num * items_per_page
         end_idx = start_idx + items_per_page
 
+        sorted_items = sorted(
+            parsed_articles[start_idx:end_idx],
+            key=lambda x: (-x['svm_prob'], -datetime.fromisoformat(x['date'] or '1900-01-01').timestamp())
+        )
+
         return {
-            # TODO: can make better
-            'items': sorted(parsed_articles[start_idx:end_idx], key=lambda x: (-x['svm_prob'], -datetime.fromisoformat(x['date'] or '1900-01-01').timestamp())),
+            'items': sorted_items,
             'total_pages': len(parsed_articles) // items_per_page
         }
     except Exception as e:
@@ -240,11 +264,10 @@ async def get_all_articles(page_num: int, items_per_page: int):
 async def create_feed(feed_url: str, feed_name: str):
     try:
         db.execute("""
-            INSERT INTO feeds (id, url, name) 
-            VALUES (nextval('feed_id_seq'), ?, ?)
-        """, [feed_url, feed_name])
+            INSERT INTO feeds (id, url, name, timestamp) 
+            VALUES (nextval('feed_id_seq'), ?, ?, ?)
+        """, [feed_url, feed_name, datetime.min])
 
-        await parse_feed(feed_url, feed_name) # update articles table
         return {"message": "Feed created successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -255,9 +278,6 @@ async def delete_feed(feed_url: str):
     try:
         db.execute("DELETE FROM feeds WHERE url = ?", [feed_url])
         db.execute("DELETE FROM articles WHERE feed_url = ?", [feed_url])
-
-        if feed_url in feed_cache:
-            del feed_cache[feed_url]
         return {"message": "Feed deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

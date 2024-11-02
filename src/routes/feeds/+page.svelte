@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
-    import { feeds, server_url } from '$lib/index';
+    import { feeds, server_url, get_feed_page } from '$lib/index';
     import Header from '../../components/header.svelte';
 
     onMount(async () => {
@@ -13,29 +13,40 @@
     let newFeedUrl = '';
     let newFeedName = '';
 
-    function deleteFeed(url) {
-        fetch(`${server_url}/delete_feed/${encodeURIComponent(url)}`, {
-            method: 'DELETE'
-        }).then(() => {
-            feeds.set(feeds.filter(feed => feed[1] !== url));
+    async function refreshFeeds() {
+        const getFeeds = await fetch(`${server_url}/get_feeds`, {
+            headers: {
+                'Cache-Control': 'no-cache'
+            }
         });
+        const data = await getFeeds.json();
+        feeds.set(data);
+        newFeedUrl = '';
+        newFeedName = '';
+    }
+
+    async function deleteFeed(url) {
+        const response = await fetch(`${server_url}/delete_feed/${encodeURIComponent(url)}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            await refreshFeeds();
+        }
+
+        get_feed_page(false); // run in background
     }
 
     async function handleSubmit() {
-        const response = await fetch(
-            `${server_url}/create_feed?feed_url=${encodeURIComponent(newFeedUrl)}&feed_name=${encodeURIComponent(newFeedName)}`,
-            {
-                method: 'POST'
-            }
-        );
+        const response = await fetch(`${server_url}/create_feed?feed_url=${encodeURIComponent(newFeedUrl)}&feed_name=${encodeURIComponent(newFeedName)}`, {
+            method: 'POST',
+        });
 
         if (response.ok) {
-            const getFeeds = await fetch(`${server_url}/get_feeds`);
-            const data = await getFeeds.json();
-            feeds.set(data);
-            newFeedUrl = '';
-            newFeedName = '';
+            await refreshFeeds();
         }
+
+        get_feed_page(false);
     }
 
     // Set dark theme
@@ -73,7 +84,7 @@
                     <a href={feed[1]} target="_blank" rel="noopener noreferrer">{feed[2]}</a>
                 </strong>
 
-                <button on:click={() => deleteFeed(feed[1])} aria-label="Delete Feed">
+                <button on:click|preventDefault={() => deleteFeed(feed[1])} aria-label="Delete Feed">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                 </button>
             </p>
