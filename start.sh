@@ -9,7 +9,7 @@ pid1=$!
 cd ..
 
 yarn install
-yarn dev --host &
+yarn dev --host --port 2400 &
 pid2=$!
 
 # Function to kill both processes

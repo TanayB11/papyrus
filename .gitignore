@@ -73,3 +73,6 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+
+htpasswd
+server/pca_plot.png

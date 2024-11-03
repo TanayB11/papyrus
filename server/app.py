@@ -99,7 +99,7 @@ CACHE_TTL = timedelta(minutes=5)
 # ================================================
 # ROUTES
 # ================================================
-@app.get('/get_feeds')
+@app.get('/api/get_feeds')
 async def get_feeds():
     """
     Get all feeds.
@@ -176,7 +176,7 @@ async def parse_feed(feed_url: str, feed_name: str):
     db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
 
 
-@app.get('/all_articles')
+@app.get('/api/all_articles')
 async def get_all_articles(page_num: int, items_per_page: int):
     """
     Get items from all feeds, paginated.
@@ -260,7 +260,7 @@ async def get_all_articles(page_num: int, items_per_page: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post('/create_feed')
+@app.post('/api/create_feed')
 async def create_feed(feed_url: str, feed_name: str):
     try:
         db.execute("""
@@ -273,7 +273,7 @@ async def create_feed(feed_url: str, feed_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete('/delete_feed/{feed_url:path}')
+@app.delete('/api/delete_feed/{feed_url:path}')
 async def delete_feed(feed_url: str):
     try:
         db.execute("DELETE FROM feeds WHERE url = ?", [feed_url])
@@ -283,7 +283,7 @@ async def delete_feed(feed_url: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post('/toggle_like_article')
+@app.post('/api/toggle_like_article')
 async def toggle_like_article(url: str):
     """
     Toggles the liked status of an article
