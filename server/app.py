@@ -1,22 +1,20 @@
 # app.py
+import asyncio
+import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from dateutil.parser import parse
-import xml.etree.ElementTree as ET
 
+import duckdb
+import feedparser
+import httpx
+import numpy as np
+import uvicorn
+from cachetools import cached, TTLCache
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from contextlib import asynccontextmanager
-import requests
-import uvicorn
-import duckdb
-import asyncio
-import httpx
-import json
-import feedparser
 
-import numpy as np
 from svm import SVMModel, gen_embeddings_data, gen_svm_data
 
 
@@ -54,6 +52,39 @@ MAX_ARTICLES = 500
 
 
 # ================================================
+# MODELING SETUP
+# ================================================
+model = SVMModel()
+VISUALIZE_PCA = True
+
+def fit_svm(model: SVMModel):
+    """
+    Fits the SVM model on the given articles
+
+    Args:
+        model (SVMModel): The SVM model to fit
+        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
+    
+    Returns:
+        bool: Whether the SVM model was successfully fitted
+    """
+    if model.train_embeddings(gen_embeddings_data(db)):
+        X, y = gen_svm_data(db)
+        if X is not None and y is not None:
+            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
+            return True
+
+    return False
+
+
+# ================================================
+# CACHING
+# ================================================
+CACHE_TTL = timedelta(minutes=5)
+article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
+
+
+# ================================================
 # HELPER METHODS
 # ================================================
 async def parse_feed(feed_url: str, feed_name: str):
@@ -70,7 +101,6 @@ async def parse_feed(feed_url: str, feed_name: str):
     except:
         raise HTTPException(status_code=500, detail=f'Error parsing feed {feed_url}')
 
-    
     num_parsed_articles = 0
 
     # lots of jank parsing stuff here
@@ -119,6 +149,52 @@ async def parse_feed(feed_url: str, feed_name: str):
     db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
 
 
+@cached(cache=article_cache)
+def refresh_articles():
+    """
+    Refreshes the articles table with new articles from all feeds
+    Also refits the SVM model
+
+    Returns:
+        list[dict]: The list of articles (dictionary format)
+    """
+    all_articles = db.execute("""
+        SELECT json_object(
+            'name', feed_name,
+            'title', title,
+            'url', url, 
+            'date', date,
+            'is_liked', is_liked,
+            'description', description
+        ) as article
+        FROM articles 
+        ORDER BY COALESCE(date, '1900-01-01') DESC
+        LIMIT ?
+    """, [MAX_ARTICLES]).fetchall()
+    all_articles = [json.loads(article[0]) for article in all_articles]
+
+    trained_svm = fit_svm(model)
+
+    parsed_articles = []
+    for article in all_articles:
+        # we need something to embed
+        if trained_svm and (article['description'] or article['title']):
+            embeddings = model.embed([
+                (article['description'] or '') + ' ' + (article['title'] or '')
+            ])
+            embeddings = np.array(embeddings)
+            svm_prob = model.predict(embeddings)
+        else:
+            svm_prob = 0.5 # ambivalent
+
+        parsed_articles.append({
+            **article,
+            'svm_prob': svm_prob
+        })
+
+    return parsed_articles
+
+
 # ================================================
 # FASTAPI SETUP
 # ================================================
@@ -130,6 +206,7 @@ async def lifespan(app: FastAPI):
     feeds = db.sql("SELECT url, name FROM feeds").fetchall()
     tasks = [parse_feed(feed[0], feed[1]) for feed in feeds]
     await asyncio.gather(*tasks)
+    refresh_articles()
 
     yield
 
@@ -145,38 +222,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ================================================
-# MODELING SETUP
-# ================================================
-model = SVMModel()
-VISUALIZE_PCA = True
-
-def fit_svm(model: SVMModel):
-    """
-    Fits the SVM model on the given articles
-
-    Args:
-        model (SVMModel): The SVM model to fit
-        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
-    
-    Returns:
-        bool: Whether the SVM model was successfully fitted
-    """
-    if model.train_embeddings(gen_embeddings_data(db)):
-        X, y = gen_svm_data(db)
-        if X is not None and y is not None:
-            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
-            return True
-
-    return False
-
-
-# ================================================
-# CACHING
-# ================================================
-CACHE_TTL = timedelta(minutes=5)
 
 
 # ================================================
@@ -197,7 +242,7 @@ async def get_feeds():
 
 
 @app.get('/api/all_articles')
-async def get_all_articles(page_num: int, items_per_page: int):
+async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
     """
     Get items from all feeds, paginated.
 
@@ -228,39 +273,9 @@ async def get_all_articles(page_num: int, items_per_page: int):
 
         await asyncio.gather(*tasks)
 
-        all_articles = db.execute("""
-            SELECT json_object(
-                'name', feed_name,
-                'title', title,
-                'url', url, 
-                'date', date,
-                'is_liked', is_liked,
-                'description', description
-            ) as article
-            FROM articles 
-            ORDER BY COALESCE(date, '1900-01-01') DESC
-            LIMIT ?
-        """, [MAX_ARTICLES]).fetchall()
-        all_articles = [json.loads(article[0]) for article in all_articles]
-
-        trained_svm = fit_svm(model)
-
-        parsed_articles = []
-        for article in all_articles:
-            # we need something to embed
-            if trained_svm and (article['description'] or article['title']):
-                embeddings = model.embed([
-                    (article['description'] or '') + ' ' + (article['title'] or '')
-                ])
-                embeddings = np.array(embeddings)
-                svm_prob = model.predict(embeddings)
-            else:
-                svm_prob = 0.5 # ambivalent
-
-            parsed_articles.append({
-                **article,
-                'svm_prob': svm_prob
-            })
+        if refresh:
+            article_cache.clear() # invalidate cache
+        parsed_articles = refresh_articles()
 
         # calculate pagination
         start_idx = page_num * items_per_page

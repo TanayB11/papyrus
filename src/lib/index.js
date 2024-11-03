@@ -11,7 +11,7 @@ export const total_pages = writable(0);
 
 export const get_feed_page = async (use_cache=true) => {
     const fetchPage = (page_num) => fetch(
-        `${server_url}/all_articles?page_num=${page_num}&items_per_page=${ITEMS_PER_PAGE}`,
+        `${server_url}/all_articles?page_num=${page_num}&items_per_page=${ITEMS_PER_PAGE}&refresh=${!use_cache}`,
         {
             headers: { 'Cache-Control': use_cache ? 'max-age=60' : 'no-cache' }
         }
