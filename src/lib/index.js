@@ -24,7 +24,7 @@ export const get_feed_page = async (use_cache=true) => {
     if (current > 0) {
         requests.push(fetchPage(current - 1));
     }
-    if (current < get(total_pages) - 1) {
+    if (current < get(total_pages) - 1 || get(total_pages) === 0) {
         requests.push(fetchPage(current + 1));
     }
 
