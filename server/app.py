@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from contextlib import asynccontextmanager
 import requests
 import uvicorn
 import duckdb
@@ -18,19 +19,6 @@ import feedparser
 import numpy as np
 from svm import SVMModel, gen_embeddings_data, gen_svm_data
 
-# ================================================
-# FASTAPI SETUP
-# ================================================
-app = FastAPI()
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ================================================
 # DATABASE SETUP
@@ -64,55 +52,10 @@ db.execute("""
 
 MAX_ARTICLES = 500
 
-# ================================================
-# MODELING SETUP
-# ================================================
-
-model = SVMModel()
-VISUALIZE_PCA = True
-
-def fit_svm(model: SVMModel):
-    """
-    Fits the SVM model on the given articles
-
-    Args:
-        model (SVMModel): The SVM model to fit
-        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
-    
-    Returns:
-        bool: Whether the SVM model was successfully fitted
-    """
-    if model.train_embeddings(gen_embeddings_data(db)):
-        X, y = gen_svm_data(db)
-        if X is not None and y is not None:
-            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
-            return True
-
-    return False
 
 # ================================================
-# CACHING
+# HELPER METHODS
 # ================================================
-
-CACHE_TTL = timedelta(minutes=5)
-
-# ================================================
-# ROUTES
-# ================================================
-@app.get('/api/get_feeds')
-async def get_feeds():
-    """
-    Get all feeds.
-
-    Returns:
-        list[(id, url, name)]: The list of RSS feeds
-    """
-    try:
-        return db.sql('SELECT * FROM feeds').fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 async def parse_feed(feed_url: str, feed_name: str):
     """
     Updates the articles table with new articles from a feed
@@ -174,6 +117,83 @@ async def parse_feed(feed_url: str, feed_name: str):
             break
 
     db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
+
+
+# ================================================
+# FASTAPI SETUP
+# ================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Speeds up startup time by pre-loading the database
+    """
+    feeds = db.sql("SELECT url, name FROM feeds").fetchall()
+    tasks = [parse_feed(feed[0], feed[1]) for feed in feeds]
+    await asyncio.gather(*tasks)
+
+    yield
+
+    db.close()
+
+app = FastAPI(lifespan=lifespan)
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ================================================
+# MODELING SETUP
+# ================================================
+model = SVMModel()
+VISUALIZE_PCA = True
+
+def fit_svm(model: SVMModel):
+    """
+    Fits the SVM model on the given articles
+
+    Args:
+        model (SVMModel): The SVM model to fit
+        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
+    
+    Returns:
+        bool: Whether the SVM model was successfully fitted
+    """
+    if model.train_embeddings(gen_embeddings_data(db)):
+        X, y = gen_svm_data(db)
+        if X is not None and y is not None:
+            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
+            return True
+
+    return False
+
+
+# ================================================
+# CACHING
+# ================================================
+CACHE_TTL = timedelta(minutes=5)
+
+
+# ================================================
+# ROUTES
+# ================================================
+@app.get('/api/get_feeds')
+async def get_feeds():
+    """
+    Get all feeds.
+
+    Returns:
+        list[(id, url, name)]: The list of RSS feeds
+    """
+    try:
+        return db.sql('SELECT * FROM feeds').fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get('/api/all_articles')
@@ -293,6 +313,7 @@ async def toggle_like_article(url: str):
         return {"message": f"Like status toggled successfully for {url}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == '__main__':
     port = os.getenv('PORT', 2430)
