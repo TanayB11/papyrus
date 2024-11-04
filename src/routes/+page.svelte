@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
-    import { get_feed_page, current_page, total_pages, nextPage, prevPage, firstPage, feed_items, server_url } from '$lib/index';
+    import { get_feed_page, current_page, total_pages, nextPage, prevPage, firstPage, refreshArticles, feed_items, server_url } from '$lib/index';
     import Header from '../components/header.svelte';
 
 
@@ -46,6 +46,7 @@
         </div>
         <div>
             <button onclick={firstPage}>view latest</button>
+            <button onclick={refreshArticles}>refresh</button>
         </div>
     </footer>
 </div>

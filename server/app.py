@@ -52,14 +52,23 @@ MAX_ARTICLES = 500
 
 
 # ================================================
+# CACHING
+# ================================================
+CACHE_TTL = timedelta(minutes=5)
+article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
+svm_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
+
+
+# ================================================
 # MODELING SETUP
 # ================================================
 model = SVMModel()
 VISUALIZE_PCA = True
 
+@cached(cache=svm_cache)
 def fit_svm(model: SVMModel):
     """
-    Fits the SVM model on the given articles
+    Fits the SVM model (in-place)on the given articles
 
     Args:
         model (SVMModel): The SVM model to fit
@@ -75,13 +84,6 @@ def fit_svm(model: SVMModel):
             return True
 
     return False
-
-
-# ================================================
-# CACHING
-# ================================================
-CACHE_TTL = timedelta(minutes=5)
-article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
 
 
 # ================================================
@@ -150,13 +152,13 @@ async def parse_feed(feed_url: str, feed_name: str):
 
 
 @cached(cache=article_cache)
-def refresh_articles():
+def load_article_data():
     """
-    Refreshes the articles table with new articles from all feeds
-    Also refits the SVM model
+    Helper method for refresh_articles
+    Gets all article data except liked status
 
     Returns:
-        list[dict]: The list of articles (dictionary format)
+        list[tuple]: The list of articles (tuple format)
     """
     all_articles = db.execute("""
         SELECT json_object(
@@ -173,12 +175,29 @@ def refresh_articles():
     """, [MAX_ARTICLES]).fetchall()
     all_articles = [json.loads(article[0]) for article in all_articles]
 
-    trained_svm = fit_svm(model)
+    return all_articles
+
+def refresh_articles():
+    """
+    Refreshes the articles table with new articles from all feeds
+    Also refits the SVM model
+
+    Returns:
+        list[dict]: The list of articles (dictionary format)
+    """
+    all_articles = load_article_data() # cached
+
+    # re-fetch most up-to-date liked status
+    # ignore what the cache says
+    liked_articles = db.execute("SELECT url FROM articles WHERE is_liked = true").fetchall()
+    liked_urls = {article[0] for article in liked_articles}
+
+    svm_is_trained = fit_svm(model)
 
     parsed_articles = []
     for article in all_articles:
         # we need something to embed
-        if trained_svm and (article['description'] or article['title']):
+        if svm_is_trained and (article['description'] or article['title']):
             embeddings = model.embed([
                 (article['description'] or '') + ' ' + (article['title'] or '')
             ])
@@ -186,6 +205,9 @@ def refresh_articles():
             svm_prob = model.predict(embeddings)
         else:
             svm_prob = 0.5 # ambivalent
+
+        # update liked status
+        article['is_liked'] = article['url'] in liked_urls
 
         parsed_articles.append({
             **article,
@@ -275,6 +297,7 @@ async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
 
         if refresh:
             article_cache.clear() # invalidate cache
+            svm_cache.clear()
         parsed_articles = refresh_articles()
 
         # calculate pagination

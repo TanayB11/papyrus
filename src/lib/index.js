@@ -54,3 +54,7 @@ export const firstPage = async () => {
     current_page.set(0);
     await get_feed_page();
 }
+
+export const refreshArticles = async () => {
+    await get_feed_page(false);
+}
