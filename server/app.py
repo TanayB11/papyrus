@@ -99,7 +99,7 @@ async def parse_feed(feed_url: str, feed_name: str):
             response = await client.get(feed_url)
         parsed_feed = feedparser.parse(response.text)
     except:
-        raise HTTPException(status_code=500, detail=f'Error parsing feed {feed_url}')
+        return
 
     num_parsed_articles = 0
 
