@@ -18,21 +18,21 @@ export const get_feed_page = async (use_cache=true) => {
     );
 
     const current = get(current_page);
-    const requests = [fetchPage(current)];
-    
-    // prefetching
-    if (current > 0) {
-        requests.push(fetchPage(current - 1));
-    }
-    if (current < get(total_pages) - 1 || get(total_pages) === 0) {
-        requests.push(fetchPage(current + 1));
-    }
 
-    const [response] = await Promise.all(requests);
+    // fetch current page
+    const response = await fetchPage(current);
     if (response.ok) {
         const data = await response.json();
         feed_items.set(data.items);
         total_pages.set(data.total_pages);
+    }
+    
+    // prefetch adjacent pages in background
+    if (current > 0) {
+        fetchPage(current - 1).catch(() => {});
+    }
+    if (current < get(total_pages) - 1 || get(total_pages) === 0) {
+        fetchPage(current + 1).catch(() => {});
     }
 }
 

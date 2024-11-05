@@ -105,7 +105,7 @@ async def parse_feed(feed_url: str, feed_name: str):
 
     num_parsed_articles = 0
 
-    # lots of jank parsing stuff here
+    articles_to_insert = []
     for item in parsed_feed.entries:
         title = item.title if 'title' in item else None
         url = item.link if 'link' in item else None
@@ -133,20 +133,30 @@ async def parse_feed(feed_url: str, feed_name: str):
         except:
             date = None
 
-        db.execute("""
+        articles_to_insert.append((feed_name, feed_url, title, url, description, date))
+
+        num_parsed_articles += 1
+        if num_parsed_articles >= MAX_ARTICLES:
+            break
+
+    if articles_to_insert:
+        # execute batch insert by expanding the VALUES clause for each article
+        placeholders = ','.join(['(?, ?, ?, ?, ?, ?, FALSE)'] * len(articles_to_insert))
+        # flatten the list of tuples into a single list of values
+        values = [val for tup in articles_to_insert for val in tup]
+        
+        db.execute(f"""
             INSERT INTO articles (feed_name, feed_url, title, url, description, date, is_liked)
-            VALUES (?, ?, ?, ?, ?, ?, FALSE)
+            SELECT * FROM (
+                VALUES {placeholders}
+            ) AS tmp(feed_name, feed_url, title, url, description, date, is_liked)
             ON CONFLICT (url) DO UPDATE SET
                 feed_name = EXCLUDED.feed_name,
                 feed_url = EXCLUDED.feed_url,
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 date = EXCLUDED.date
-        """, [feed_name, feed_url, title, url, description, date])
-
-        num_parsed_articles += 1
-        if num_parsed_articles >= MAX_ARTICLES:
-            break
+        """, values)
 
     db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
 
