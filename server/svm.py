@@ -57,6 +57,8 @@ class SVMModel:
         """
         if len(dataset) < self.min_dataset_size:
             return False
+        if self.tfidf and self.pca: # don't retrain
+            return True
         
         # extract features from article descriptions
         self.tfidf = TfidfVectorizer().fit(dataset)

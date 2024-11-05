@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
     import { darkMode } from '$lib/darkmode';
-    import { get_feed_page, current_page, total_pages, nextPage, prevPage, firstPage, refreshArticles, feed_items, server_url } from '$lib/index';
+    import { get_feed_page, current_page, total_pages, nextPage, prevPage, firstPage, refreshArticles, feed_items, toggleArticleLike } from '$lib/index';
     import Header from '../components/header.svelte';
 
 
@@ -10,7 +10,7 @@
     });
 
     async function toggle_like_article(url) {
-        await fetch(`${server_url}/toggle_like_article?url=${encodeURIComponent(url)}`, { method: 'POST' });
+        await toggleArticleLike(url);
         await get_feed_page(false);
     }
 

@@ -56,6 +56,7 @@ MAX_ARTICLES = 500
 # ================================================
 CACHE_TTL = timedelta(minutes=5)
 article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
+liked_article_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
 svm_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
 
 
@@ -77,7 +78,11 @@ def fit_svm(model: SVMModel):
     Returns:
         bool: Whether the SVM model was successfully fitted
     """
-    if model.train_embeddings(gen_embeddings_data(db)):
+    embeddings_exist = model.tfidf and model.pca
+    if not embeddings_exist:
+        embeddings_exist = model.train_embeddings(gen_embeddings_data(db))
+
+    if embeddings_exist:
         X, y = gen_svm_data(db)
         if X is not None and y is not None:
             model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
@@ -187,6 +192,17 @@ def load_article_data():
 
     return all_articles
 
+
+@cached(cache=liked_article_cache)
+def load_liked_articles():
+    """
+    Returns the list of liked articles
+    """
+    return {
+        article[0]
+        for article in db.execute("SELECT url FROM articles WHERE is_liked = true").fetchall()
+    }
+
 def refresh_articles():
     """
     Refreshes the articles table with new articles from all feeds
@@ -196,11 +212,7 @@ def refresh_articles():
         list[dict]: The list of articles (dictionary format)
     """
     all_articles = load_article_data() # cached
-
-    # re-fetch most up-to-date liked status
-    # ignore what the cache says
-    liked_articles = db.execute("SELECT url FROM articles WHERE is_liked = true").fetchall()
-    liked_urls = {article[0] for article in liked_articles}
+    liked_urls = load_liked_articles() # cached
 
     svm_is_trained = fit_svm(model)
 
@@ -358,6 +370,8 @@ async def toggle_like_article(url: str):
     """
     try:
         db.execute("UPDATE articles SET is_liked = NOT is_liked WHERE url = ?", [url])
+        liked_article_cache.clear() # invalidate cache
+
         return {"message": f"Like status toggled successfully for {url}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

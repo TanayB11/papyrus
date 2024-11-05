@@ -58,3 +58,30 @@ export const firstPage = async () => {
 export const refreshArticles = async () => {
     await get_feed_page(false);
 }
+
+export const toggleArticleLike = async (url) => {
+    // optimistically update UI
+    feed_items.update(items => 
+        items.map(item => 
+            item.url === url 
+                ? {...item, is_liked: !item.is_liked}
+                : item
+        )
+    );
+
+    // send request in background
+    try {
+        await fetch(`${server_url}/toggle_like_article?url=${encodeURIComponent(url)}`, {
+            method: 'POST'
+        });
+    } catch (error) {
+        // revert on error
+        feed_items.update(items => 
+            items.map(item => 
+                item.url === url 
+                    ? {...item, is_liked: !item.is_liked}
+                    : item
+            )
+        );
+    }
+}
