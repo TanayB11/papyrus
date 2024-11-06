@@ -38,8 +38,9 @@ Then run `./start.sh` in the background (either tmux or append `&`)
 
 The database lives in `server/data`, in case you want to back it up. I use an NGINX reverse proxy to serve the frontend/backend + add password protection.
 
-### Disclaimers
+### Disclaimers/Notes
 
 1. This was hacked together in my spare time over ~1 week
 2. A lot of this code is underoptimized; I'm working on making page requests faster
 3. A lot of this code is LLM generated. I want to see how far I can push current tools.
+4. The style is the same as my [blog](https://tanaybiradar.com/) - derived from [bearblog](https://bearblog.dev/) and [flexoki](https://stephango.com/flexoki)
