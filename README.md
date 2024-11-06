@@ -7,6 +7,8 @@ What if we could recommend articles based on what *you* like?
 
 Papyrus uses a super-simple recommendation system (SVM over TF-IDF features) to learn your preferences.
 
+![papyrus](figures/papyrus.png)
+
 ### Setup
 
 - Requires python3 and node.js
