@@ -51,6 +51,7 @@ db.execute("""
 MAX_ARTICLES = 500
 
 
+
 # ================================================
 # CACHING
 # ================================================
@@ -319,7 +320,6 @@ async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
 
         if refresh:
             article_cache.clear() # invalidate cache
-            svm_cache.clear()
         parsed_articles = refresh_articles()
 
         # calculate pagination
