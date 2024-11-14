@@ -1,10 +1,16 @@
+import duckdb
 import numpy as np
 from matplotlib import pyplot as plt
 from sklearn.svm import SVC
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import PCA
 
-import duckdb
+from cachetools import cached
+from utils import svm_cache, VISUALIZE_PCA
+
+# ================================================
+#  MODEL DEFINITION
+# ================================================
 
 class SVMModel:
     def __init__(self, tfidf_pca_dataset_size: int=500, pca_max_n_components: int=100, min_dataset_size: int=25):
@@ -146,3 +152,23 @@ def gen_embeddings_data(conn: duckdb.DuckDBPyConnection):
         for article in conn.sql('SELECT description, title FROM articles').fetchall()
         if article[0] and article[1]
     ]
+
+@cached(cache=svm_cache)
+def fit_svm(model: SVMModel, conn: duckdb.DuckDBPyConnection):
+    """
+    Fits the SVM model (in-place)on the given articles
+
+    Returns:
+        bool: Whether the SVM model was successfully fitted
+    """
+    embeddings_exist = model.tfidf and model.pca
+    if not embeddings_exist:
+        embeddings_exist = model.train_embeddings(gen_embeddings_data(conn))
+
+    if embeddings_exist:
+        X, y = gen_svm_data(conn)
+        if X is not None and y is not None:
+            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
+            return True
+
+    return False

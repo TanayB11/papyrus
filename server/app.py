@@ -1,171 +1,28 @@
-# app.py
 import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
-from dateutil.parser import parse
+from datetime import datetime
 
-import duckdb
 import feedparser
-import httpx
 import numpy as np
 import uvicorn
-from cachetools import cached, TTLCache
+from cachetools import cached
+from dateutil.parser import parse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from svm import SVMModel, gen_embeddings_data, gen_svm_data
+from svm import SVMModel, fit_svm
+from utils import (CACHE_TTL, MAX_ARTICLES,
+                   article_cache, liked_article_cache, svm_cache,
+                   setup_db, parse_feed)
 
-
-# ================================================
-# DATABASE SETUP
-# ================================================
-db = duckdb.connect('./data/papyrus.db') # optimistic concurrency control by default
-
-db.execute("CREATE SEQUENCE IF NOT EXISTS feed_id_seq;")
-db.execute("CREATE SEQUENCE IF NOT EXISTS article_id_seq;")
-
-db.execute("""
-    CREATE TABLE IF NOT EXISTS feeds (
-        id INTEGER PRIMARY KEY DEFAULT nextval('feed_id_seq'),
-        url VARCHAR,
-        name VARCHAR,
-        timestamp TIMESTAMP
-    )
-""")
-
-db.execute("""
-    CREATE TABLE IF NOT EXISTS articles (
-        id INTEGER PRIMARY KEY DEFAULT nextval('article_id_seq'),
-        feed_name VARCHAR,
-        feed_url VARCHAR,
-        title VARCHAR,
-        url VARCHAR UNIQUE,
-        date DATE,
-        description VARCHAR,
-        is_liked BOOLEAN,
-    )
-""")
-
-MAX_ARTICLES = 500
-
-
-
-# ================================================
-# CACHING
-# ================================================
-CACHE_TTL = timedelta(minutes=5)
-article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
-liked_article_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
-svm_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
-
-
-# ================================================
-# MODELING SETUP
-# ================================================
+db = setup_db()
 model = SVMModel()
-VISUALIZE_PCA = True
-
-@cached(cache=svm_cache)
-def fit_svm(model: SVMModel):
-    """
-    Fits the SVM model (in-place)on the given articles
-
-    Args:
-        model (SVMModel): The SVM model to fit
-        all_articles (list[dict]): The list of all articles (from the articles table, dictionary format)
-    
-    Returns:
-        bool: Whether the SVM model was successfully fitted
-    """
-    embeddings_exist = model.tfidf and model.pca
-    if not embeddings_exist:
-        embeddings_exist = model.train_embeddings(gen_embeddings_data(db))
-
-    if embeddings_exist:
-        X, y = gen_svm_data(db)
-        if X is not None and y is not None:
-            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
-            return True
-
-    return False
-
 
 # ================================================
 # HELPER METHODS
 # ================================================
-async def parse_feed(feed_url: str, feed_name: str):
-    """
-    Updates the articles table with new articles from a feed
-    """
-    parsed_articles = []
-    current_time = datetime.now()
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(feed_url)
-        parsed_feed = feedparser.parse(response.text)
-    except:
-        return
-
-    num_parsed_articles = 0
-
-    articles_to_insert = []
-    for item in parsed_feed.entries:
-        title = item.title if 'title' in item else None
-        url = item.link if 'link' in item else None
-
-        description = None
-        if 'content' in item:
-            description = item.content[0].value
-        elif 'description' in item:
-            description = item.description
-            if type(description) == tuple:
-                description = description[0]
-            else:
-                description = None
-
-        date_str = None
-        if 'published' in item:
-            date_str = item.published
-        elif 'updated' in item:
-            date_str = item.updated
-        elif 'pubDate' in item:
-            date_str = item.pubDate
-
-        try:
-            date = parse(date_str).strftime('%Y-%m-%d') if date_str else None
-        except:
-            date = None
-
-        articles_to_insert.append((feed_name, feed_url, title, url, description, date))
-
-        num_parsed_articles += 1
-        if num_parsed_articles >= MAX_ARTICLES:
-            break
-
-    if articles_to_insert:
-        # execute batch insert by expanding the VALUES clause for each article
-        placeholders = ','.join(['(?, ?, ?, ?, ?, ?, FALSE)'] * len(articles_to_insert))
-        # flatten the list of tuples into a single list of values
-        values = [val for tup in articles_to_insert for val in tup]
-        
-        db.execute(f"""
-            INSERT INTO articles (feed_name, feed_url, title, url, description, date, is_liked)
-            SELECT * FROM (
-                VALUES {placeholders}
-            ) AS tmp(feed_name, feed_url, title, url, description, date, is_liked)
-            ON CONFLICT (url) DO UPDATE SET
-                feed_name = EXCLUDED.feed_name,
-                feed_url = EXCLUDED.feed_url,
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                date = EXCLUDED.date
-        """, values)
-
-    db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
-
 
 @cached(cache=article_cache)
 def load_article_data():
@@ -214,7 +71,7 @@ def refresh_articles():
     """
     all_articles = load_article_data() # cached
     liked_urls = load_liked_articles() # cached
-    svm_is_trained = fit_svm(model) # cached
+    svm_is_trained = fit_svm(model, db) # cached
 
     parsed_articles = []
     for article in all_articles:
@@ -248,7 +105,7 @@ async def lifespan(app: FastAPI):
     Speeds up startup time by pre-loading the database
     """
     feeds = db.sql("SELECT url, name FROM feeds").fetchall()
-    tasks = [parse_feed(feed[0], feed[1]) for feed in feeds]
+    tasks = [parse_feed(db, feed[0], feed[1]) for feed in feeds]
     await asyncio.gather(*tasks)
     refresh_articles()
 
@@ -310,7 +167,7 @@ async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
 
         # populate articles table
         tasks = [
-            parse_feed(feed['url'], feed['name']) for feed in feeds
+            parse_feed(db, feed['url'], feed['name']) for feed in feeds
             if datetime.now() - datetime.fromisoformat(feed['timestamp']) > CACHE_TTL
         ]
 
