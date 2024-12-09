@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from svm import SVMModel, fit_svm
-from utils import ARTICLE_REFRESH_INTERVAL, MAX_ARTICLES, setup_db, parse_all_feeds
+from utils import ARTICLE_REFRESH_INTERVAL, MAX_ARTICLES, LOG_FILE, setup_db, parse_all_feeds
 
 db = setup_db()
 model = SVMModel()
@@ -147,6 +147,8 @@ async def get_feeds():
     try:
         return db.sql('SELECT * FROM feeds').fetchall()
     except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -183,6 +185,8 @@ async def get_articles(page_num: int, items_per_page: int, refresh: bool):
             'total_pages': len(parsed_articles) // items_per_page
         }
     except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -198,6 +202,8 @@ async def create_feed(feed_url: str, feed_name: str):
 
         return {"message": "Feed created successfully"}
     except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -210,6 +216,8 @@ async def delete_feed(feed_url: str):
 
         return {"message": "Feed deleted successfully"}
     except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -224,4 +232,6 @@ async def toggle_like_article(url: str):
 
         return {"message": f"Like status toggled successfully for {url}"}
     except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
         raise HTTPException(status_code=500, detail=str(e))

@@ -12,6 +12,7 @@ from dateutil.parser import parse
 MAX_ARTICLES = 500
 VISUALIZE_PCA = True # generates figures when training model
 ARTICLE_REFRESH_INTERVAL = 60 # time (minutes) to automatically grab articles and train svm
+LOG_FILE = './data/log.txt'
 
 
 # ================================================
