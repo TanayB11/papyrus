@@ -1,14 +1,18 @@
 import duckdb
 import httpx
+import json
+import feedparser
 
 from datetime import timedelta, datetime
-from cachetools import TTLCache
+from dateutil.parser import parse
 
 # ================================================
 # CONSTANTS
 # ================================================
 MAX_ARTICLES = 500
 VISUALIZE_PCA = True # generates figures when training model
+ARTICLE_REFRESH_INTERVAL = 60 # time (minutes) to automatically grab articles and train svm
+
 
 # ================================================
 # DATABASE SETUP
@@ -43,39 +47,39 @@ def setup_db():
 
     return db
 
-# ================================================
-# CACHING
-# ================================================
-CACHE_TTL = timedelta(minutes=5)
-article_cache = TTLCache(maxsize=500, ttl=CACHE_TTL.total_seconds())
-liked_article_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
-svm_cache = TTLCache(maxsize=1, ttl=CACHE_TTL.total_seconds())
-
 
 # ================================================
 # RSS FEED PARSING
 # ================================================
-def get_articles_to_insert(parsed_feed):
+async def parse_one_feed(feed: dict):
     """
-    Helper method for parse_feed
     Prepares a list of articles to insert into the database
 
     Args:
-        parsed_feed (feedparser.FeedParserDict): The parsed RSS feed from feedparser
+        feed (dict): RSS feed containing (url, name, etc.)
     """
-    articles_to_insert = []
+    feed_articles = []
 
+    # get the RSS XML
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(feed['url'])
+        parsed_feed = feedparser.parse(response.text)
+    except Exception as e:
+        raise e
+        return
+    
     num_parsed_articles = 0
-    for item in parsed_feed.entries:
-        title = item.title if 'title' in item else None
-        url = item.link if 'link' in item else None
+    for article in parsed_feed.entries:
+        article_title = article.title if 'title' in article else None
+        article_url = article.link if 'link' in article else None
 
         # get article description/content
         description = None
-        if 'content' in item:
-            description = item.content[0].value
-        elif 'description' in item:
-            description = item.description
+        if 'content' in article:
+            description = article.content[0].value
+        elif 'description' in article:
+            description = article.description
             if type(description) == tuple:
                 description = description[0]
             else:
@@ -83,61 +87,66 @@ def get_articles_to_insert(parsed_feed):
 
         # get article published date
         date_str = None
-        if 'published' in item:
-            date_str = item.published
-        elif 'updated' in item:
-            date_str = item.updated
-        elif 'pubDate' in item:
-            date_str = item.pubDate
+        if 'published' in article:
+            date_str = article.published
+        elif 'updated' in article:
+            date_str = article.updated
+        elif 'pubDate' in article:
+            date_str = article.pubDate
 
         try:
             date = parse(date_str).strftime('%Y-%m-%d') if date_str else None
         except:
             date = None
 
-        articles_to_insert.append((feed_name, feed_url, title, url, description, date))
+        feed_articles.append((feed['name'], feed['url'], article_title, article_url, description, date))
         num_parsed_articles += 1
         if num_parsed_articles >= MAX_ARTICLES:
             break
     
-    return articles_to_insert
+    return feed_articles
 
 
-async def parse_feed(db: duckdb.duckdb, feed_url: str, feed_name: str):
+async def parse_all_feeds(db: duckdb.duckdb):
     """
     Updates the articles table with new articles from a feed
     """
     parsed_articles = []
     current_time = datetime.now()
 
-    # get the feed XML
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(feed_url)
-        parsed_feed = feedparser.parse(response.text)
-    except:
-        return
+    # get the feed URLs
+    all_feeds = db.sql("""
+        SELECT json_object(
+            'url', url,
+            'name', name,
+            'timestamp', timestamp
+        ) as feed 
+        FROM feeds
+    """).fetchall()
+    feeds = [json.loads(feed[0]) for feed in all_feeds]
 
-    articles_to_insert = get_articles_to_insert(parsed_feed)
+    for feed in feeds:
+        feed_articles = await parse_one_feed(feed)
 
-    # update database
-    if articles_to_insert:
-        # execute batch insert by expanding the VALUES clause for each article
-        placeholders = ','.join(['(?, ?, ?, ?, ?, ?, FALSE)'] * len(articles_to_insert))
-        # flatten the list of tuples into a single list of values
-        values = [val for tup in articles_to_insert for val in tup]
-        
-        db.execute(f"""
-            INSERT INTO articles (feed_name, feed_url, title, url, description, date, is_liked)
-            SELECT * FROM (
-                VALUES {placeholders}
-            ) AS tmp(feed_name, feed_url, title, url, description, date, is_liked)
-            ON CONFLICT (url) DO UPDATE SET
-                feed_name = EXCLUDED.feed_name,
-                feed_url = EXCLUDED.feed_url,
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                date = EXCLUDED.date
-        """, values)
+        feed_url = feed['url']
+        feed_name = feed['name']
 
-    db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])
+        # update database
+        if feed_articles:
+            placeholders = ','.join(['(?, ?, ?, ?, ?, ?, FALSE)'] * len(feed_articles)) # batch insert
+            values = [val for tup in feed_articles for val in tup] # flatten
+            
+            db.execute(f"""
+                INSERT INTO articles (feed_name, feed_url, title, url, description, date, is_liked)
+                SELECT * FROM (
+                    VALUES {placeholders}
+                ) AS tmp(feed_name, feed_url, title, url, description, date, is_liked)
+                ON CONFLICT (url) DO UPDATE SET
+                    feed_name = EXCLUDED.feed_name,
+                    feed_url = EXCLUDED.feed_url,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    date = EXCLUDED.date
+            """, values)
+
+        db.execute("UPDATE feeds SET timestamp = ? WHERE url = ?", [current_time, feed_url])

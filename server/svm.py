@@ -5,8 +5,7 @@ from sklearn.svm import SVC
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import PCA
 
-from cachetools import cached
-from utils import svm_cache, VISUALIZE_PCA
+from utils import VISUALIZE_PCA
 
 # ================================================
 #  MODEL DEFINITION
@@ -92,6 +91,9 @@ class SVMModel:
             X (n_samples, pca_n_components): embeddings (tfidf + pca)
             y (n_samples,): labels (1 for liked, 0 for unliked)
             visualize (bool): whether to visualize the PCA (and dump plot to file)
+        
+        Returns:
+            bool: True if successful, False otherwise
         """
         if not (self.tfidf and self.pca):
             return False
@@ -100,7 +102,12 @@ class SVMModel:
             self.visualize_pca(X, y, input_is_embeddings=True)
 
         self.svm = SVC(kernel='rbf', probability=True)
-        self.svm.fit(X, y)
+
+        try:
+            self.svm.fit(X, y)
+            return True
+        except ValueError as e:
+            return False # not enough data
 
     def predict(self, X: np.ndarray):
         """
@@ -153,7 +160,6 @@ def gen_embeddings_data(conn: duckdb.DuckDBPyConnection):
         if article[0] and article[1]
     ]
 
-@cached(cache=svm_cache)
 def fit_svm(model: SVMModel, conn: duckdb.DuckDBPyConnection):
     """
     Fits the SVM model (in-place)on the given articles
@@ -168,7 +174,6 @@ def fit_svm(model: SVMModel, conn: duckdb.DuckDBPyConnection):
     if embeddings_exist:
         X, y = gen_svm_data(conn)
         if X is not None and y is not None:
-            model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
-            return True
+            return model.train_svm(model.embed(X), y, visualize=VISUALIZE_PCA)
 
     return False

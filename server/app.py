@@ -4,31 +4,27 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-import feedparser
 import numpy as np
 import uvicorn
-from cachetools import cached
-from dateutil.parser import parse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from svm import SVMModel, fit_svm
-from utils import (CACHE_TTL, MAX_ARTICLES,
-                   article_cache, liked_article_cache, svm_cache,
-                   setup_db, parse_feed)
+from utils import ARTICLE_REFRESH_INTERVAL, MAX_ARTICLES, setup_db, parse_all_feeds
 
 db = setup_db()
 model = SVMModel()
+parsed_articles = []
+
 
 # ================================================
 # HELPER METHODS
 # ================================================
 
-@cached(cache=article_cache)
-def load_article_data():
+def load_article_table():
     """
     Helper method for refresh_articles
-    Gets all article data except liked status
+    Gets all article data (except liked status, for caching reasons)
 
     Returns:
         list[tuple]: The list of articles (tuple format)
@@ -51,7 +47,6 @@ def load_article_data():
     return all_articles
 
 
-@cached(cache=liked_article_cache)
 def load_liked_articles():
     """
     Returns the list of liked articles
@@ -61,17 +56,21 @@ def load_liked_articles():
         for article in db.execute("SELECT url FROM articles WHERE is_liked = true").fetchall()
     }
 
-def refresh_articles():
+
+async def refresh_parsed_articles():
     """
-    Refreshes the articles table with new articles from all feeds
+    Refreshes the articles table in the DB with new articles from all feeds
     Also refits the SVM model
 
     Returns:
         list[dict]: The list of articles (dictionary format)
     """
-    all_articles = load_article_data() # cached
-    liked_urls = load_liked_articles() # cached
-    svm_is_trained = fit_svm(model, db) # cached
+    global parsed_articles
+
+    await parse_all_feeds(db)
+    all_articles = load_article_table()
+    liked_urls = load_liked_articles()
+    svm_is_trained = fit_svm(model, db)
 
     parsed_articles = []
     for article in all_articles:
@@ -96,6 +95,18 @@ def refresh_articles():
     return parsed_articles
 
 
+async def auto_feed_refresh():
+    """
+    Refreshes the feeds and trains the SVM in regular intervals
+    """
+    global parsed_articles
+
+    mins_to_sleep = 60
+    while True:
+        parsed_articles = await refresh_parsed_articles()
+        await asyncio.sleep(60 * mins_to_sleep)
+
+
 # ================================================
 # FASTAPI SETUP
 # ================================================
@@ -104,10 +115,7 @@ async def lifespan(app: FastAPI):
     """
     Speeds up startup time by pre-loading the database
     """
-    feeds = db.sql("SELECT url, name FROM feeds").fetchall()
-    tasks = [parse_feed(db, feed[0], feed[1]) for feed in feeds]
-    await asyncio.gather(*tasks)
-    refresh_articles()
+    asyncio.create_task(auto_feed_refresh())
 
     yield
 
@@ -142,8 +150,8 @@ async def get_feeds():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get('/api/all_articles')
-async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
+@app.get('/api/articles')
+async def get_articles(page_num: int, items_per_page: int, refresh: bool):
     """
     Get items from all feeds, paginated.
 
@@ -152,30 +160,14 @@ async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
         items_per_page (int): The number of items per page
 
     Returns:
-        dict{items, total_pages}: The items and total number of pages
+        dict(items, total_pages): The items and total number of pages
     """
+    global parsed_articles
+
     try:
-        all_feeds = db.sql("""
-            SELECT json_object(
-                'url', url,
-                'name', name,
-                'timestamp', timestamp
-            ) as feed 
-            FROM feeds
-        """).fetchall()
-        feeds = [json.loads(feed[0]) for feed in all_feeds]
-
-        # populate articles table
-        tasks = [
-            parse_feed(db, feed['url'], feed['name']) for feed in feeds
-            if datetime.now() - datetime.fromisoformat(feed['timestamp']) > CACHE_TTL
-        ]
-
-        await asyncio.gather(*tasks)
-
+        # force refresh everything
         if refresh:
-            article_cache.clear() # invalidate cache
-        parsed_articles = refresh_articles()
+            parsed_articles = await refresh_parsed_articles()
 
         # calculate pagination
         start_idx = page_num * items_per_page
@@ -191,7 +183,6 @@ async def get_all_articles(page_num: int, items_per_page: int, refresh: bool):
             'total_pages': len(parsed_articles) // items_per_page
         }
     except Exception as e:
-        raise e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -203,6 +194,8 @@ async def create_feed(feed_url: str, feed_name: str):
             VALUES (nextval('feed_id_seq'), ?, ?, ?)
         """, [feed_url, feed_name, datetime.min])
 
+        parse_all_feeds(db) # run in background is ok
+
         return {"message": "Feed created successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -213,6 +206,8 @@ async def delete_feed(feed_url: str):
     try:
         db.execute("DELETE FROM feeds WHERE url = ?", [feed_url])
         db.execute("DELETE FROM articles WHERE feed_url = ?", [feed_url])
+        await parse_all_feeds(db)
+
         return {"message": "Feed deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -222,10 +217,10 @@ async def delete_feed(feed_url: str):
 async def toggle_like_article(url: str):
     """
     Toggles the liked status of an article
+    Changes will propagate on next refresh
     """
     try:
         db.execute("UPDATE articles SET is_liked = NOT is_liked WHERE url = ?", [url])
-        liked_article_cache.clear() # invalidate cache
 
         return {"message": f"Like status toggled successfully for {url}"}
     except Exception as e:

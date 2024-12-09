@@ -11,7 +11,6 @@
 
     async function toggle_like_article(url) {
         await toggleArticleLike(url);
-        await get_feed_page(false);
     }
 
     onMount(darkMode.init);
