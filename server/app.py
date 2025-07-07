@@ -39,6 +39,7 @@ def load_article_table():
             'description', description
         ) as article
         FROM articles 
+        WHERE feed_url IN (SELECT url FROM feeds WHERE is_visible = TRUE)
         ORDER BY COALESCE(date, '1900-01-01') DESC
         LIMIT ?
     """, [MAX_ARTICLES]).fetchall()
@@ -142,7 +143,7 @@ async def get_feeds():
     Get all feeds.
 
     Returns:
-        list[(id, url, name)]: The list of RSS feeds
+        list[(id, url, name, timestamp, is_visible)]: The list of RSS feeds
     """
     try:
         return db.sql('SELECT * FROM feeds').fetchall()
@@ -225,12 +226,47 @@ async def delete_feed(feed_url: str):
 async def toggle_like_article(url: str):
     """
     Toggles the liked status of an article
-    Changes will propagate on next refresh
+    Changes are immediately reflected in cache
     """
+    global parsed_articles
+    
     try:
+        # Get current liked status
+        current_status = db.execute("SELECT is_liked FROM articles WHERE url = ?", [url]).fetchone()
+        if not current_status:
+            raise HTTPException(status_code=404, detail="Article not found")
+        
+        # Toggle in database
         db.execute("UPDATE articles SET is_liked = NOT is_liked WHERE url = ?", [url])
+        new_status = not current_status[0]
+        
+        # Update cache immediately
+        for article in parsed_articles:
+            if article['url'] == url:
+                article['is_liked'] = new_status
+                break
 
-        return {"message": f"Like status toggled successfully for {url}"}
+        return {"message": f"Like status toggled successfully for {url}", "new_status": new_status}
+    except Exception as e:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f'{datetime.now()} - {str(e)}\n')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/api/toggle_feed_visibility')
+async def toggle_feed_visibility(feed_url: str):
+    """
+    Toggles the visibility status of a feed
+    """
+    global parsed_articles
+    
+    try:
+        db.execute("UPDATE feeds SET is_visible = NOT is_visible WHERE url = ?", [feed_url])
+        
+        # Refresh cache to immediately reflect visibility changes
+        parsed_articles = await refresh_parsed_articles()
+
+        return {"message": f"Visibility status toggled successfully for {feed_url}"}
     except Exception as e:
         with open(LOG_FILE, 'a') as f:
             f.write(f'{datetime.now()} - {str(e)}\n')
