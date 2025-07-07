@@ -82,3 +82,22 @@ export const toggleArticleLike = async (url) => {
         );
     }
 }
+
+export const updateArticlesForFeedVisibility = (feedUrl, isVisible) => {
+    if (!isVisible) {
+        // Remove articles from hidden feed immediately
+        feed_items.update(items => 
+            items.filter(item => item.name !== getFeedNameByUrl(feedUrl))
+        );
+    } else {
+        // For showing feeds, we need to refresh to get the articles back
+        get_feed_page(false);
+    }
+}
+
+// Helper function to get feed name by URL (we'll need this for filtering)
+const getFeedNameByUrl = (feedUrl) => {
+    const currentFeeds = get(feeds);
+    const feed = currentFeeds.find(f => f[1] === feedUrl);
+    return feed ? feed[2] : null;
+}
